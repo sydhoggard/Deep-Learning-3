@@ -12,11 +12,10 @@ NUM_CLASSES_LENGTH = 6
 NUM_CLASSES_DIGIT = 11
 
 BATCH_SIZE = 64
-EPOCHS = 15
+EPOCHS = 25
 LR = 0.001
-MODEL_PATH = "svhn_cnn_model.keras"
+MODEL_PATH = "svhn_cnn_model_improved.keras"
 
-# Memory-map instead of loading everything fully into RAM
 X = np.load("train_images.npy", mmap_mode="r")
 y = np.load("train_labels.npy", mmap_mode="r")
 
@@ -70,25 +69,37 @@ val_ds = make_dataset(val_idx, shuffle=False)
 
 inputs = keras.Input(shape=(IMG_SIZE, IMG_SIZE, 3), name="image")
 
-x = layers.RandomRotation(0.03)(inputs)
-x = layers.RandomZoom(0.08)(x)
-x = layers.RandomContrast(0.10)(x)
+# Reduced augmentation
+x = layers.RandomRotation(0.015)(inputs)
+x = layers.RandomZoom(0.04)(x)
+x = layers.RandomContrast(0.05)(x)
 
+# CNN block 1
+x = layers.Conv2D(32, 3, padding="same", activation="relu")(x)
 x = layers.Conv2D(32, 3, padding="same", activation="relu")(x)
 x = layers.MaxPooling2D(2)(x)
 
+# CNN block 2
+x = layers.Conv2D(64, 3, padding="same", activation="relu")(x)
 x = layers.Conv2D(64, 3, padding="same", activation="relu")(x)
 x = layers.MaxPooling2D(2)(x)
 
+# CNN block 3
 x = layers.Conv2D(128, 3, padding="same", activation="relu")(x)
+x = layers.Conv2D(128, 3, padding="same", activation="relu")(x)
+x = layers.MaxPooling2D(2)(x)
+
+# New stronger CNN block 4
+x = layers.Conv2D(256, 3, padding="same", activation="relu")(x)
+x = layers.Conv2D(256, 3, padding="same", activation="relu")(x)
 x = layers.MaxPooling2D(2)(x)
 
 x = layers.Flatten()(x)
 
-x = layers.Dense(256, activation="relu")(x)
+x = layers.Dense(512, activation="relu")(x)
 x = layers.Dropout(0.4)(x)
 
-x = layers.Dense(128, activation="relu")(x)
+x = layers.Dense(256, activation="relu")(x)
 x = layers.Dropout(0.3)(x)
 
 length_out = layers.Dense(NUM_CLASSES_LENGTH, activation="softmax", name="length")(x)
@@ -115,10 +126,10 @@ model.compile(
     },
     loss_weights={
         "length": 0.5,
-        "digit_1": 1.5,
-        "digit_2": 1.5,
-        "digit_3": 1.2,
-        "digit_4": 1.0,
+        "digit_1": 1.2,
+        "digit_2": 1.3,
+        "digit_3": 1.7,
+        "digit_4": 2.0,
         "digit_5": 1.0,
     },
     metrics={
@@ -142,7 +153,7 @@ callbacks = [
     ),
     keras.callbacks.EarlyStopping(
         monitor="val_loss",
-        patience=4,
+        patience=5,
         restore_best_weights=True,
         verbose=1
     ),
@@ -164,7 +175,7 @@ history = model.fit(
 
 model.save(MODEL_PATH)
 
-with open("training_history.json", "w") as f:
+with open("training_history_improved.json", "w") as f:
     json.dump(
         {k: [float(v) for v in vals] for k, vals in history.history.items()},
         f,
@@ -172,3 +183,4 @@ with open("training_history.json", "w") as f:
     )
 
 print("Saved model:", MODEL_PATH)
+print("Saved history: training_history_improved.json")
