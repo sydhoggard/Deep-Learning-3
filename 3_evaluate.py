@@ -1,7 +1,7 @@
 import numpy as np
 from tensorflow import keras
 
-MODEL_PATH = "svhn_cnn_model.keras"
+MODEL_PATH = "svhn_cnn_model_improved.keras"
 MAX_DIGITS = 5
 BATCH_SIZE = 128
 
