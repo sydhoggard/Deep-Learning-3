@@ -172,3 +172,5 @@ with open("training_history.json", "w") as f:
     )
 
 print("Saved model:", MODEL_PATH)
+with open("training_history.json", "w") as f:
+    json.dump({k: [float(x) for x in v] for k, v in history.history.items()}, f, indent=2)
