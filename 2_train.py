@@ -1,160 +1,174 @@
-"""
-Script 2: Train SVHN Multi-Digit Model
-- Loads preprocessed .npy files from Script 1
-- Builds a CNN backbone with k+1 softmax heads (length + 5 digit heads)
-- Trains with early stopping and learning-rate reduction
-- Saves the best model to svhn_model.keras
-
-Usage:
-    python 2_train.py
-
-Requirements:
-    train_images.npy, train_labels.npy  (from 1_preprocess.py)
-"""
-
+import json
 import numpy as np
 import tensorflow as tf
 from tensorflow import keras
 from tensorflow.keras import layers
-import os
 
-# ── Config ──────────────────────────────────────────────────────────────────
-IMG_SIZE   = 96          # must match 1_preprocess.py
-MAX_DIGITS = 5           # number of digit heads
-NUM_CLASSES_DIGIT  = 11  # digits 1-9, 10 (=0), plus null class 0
-NUM_CLASSES_LENGTH = 6   # 0-5 digits (0 means "no number" / padding)
+tf.keras.backend.clear_session()
+
+IMG_SIZE = 96
+MAX_DIGITS = 5
+NUM_CLASSES_LENGTH = 6
+NUM_CLASSES_DIGIT = 11
+
 BATCH_SIZE = 64
-EPOCHS     = 10
-LR         = 1e-3
-MODEL_PATH = "svhn_model.keras"
-# ────────────────────────────────────────────────────────────────────────────
+EPOCHS = 15
+LR = 0.001
+MODEL_PATH = "svhn_cnn_model.keras"
 
+# Memory-map instead of loading everything fully into RAM
+X = np.load("train_images.npy", mmap_mode="r")
+y = np.load("train_labels.npy", mmap_mode="r")
 
-# ── 1. Load data ─────────────────────────────────────────────────────────────
-print("Loading data ...")
-X_train = np.load("train_images.npy").astype("float32") / 255.0
-y_train = np.load("train_labels.npy")          # shape (N, MAX_DIGITS+1)
-
-# Split off 10 % as validation
+N = len(X)
 rng = np.random.default_rng(42)
-idx = rng.permutation(len(X_train))
-split = int(len(X_train) * 0.9)
-train_idx, val_idx = idx[:split], idx[split:]
+idx = rng.permutation(N)
 
-X_val   = X_train[val_idx];   X_train = X_train[train_idx]
-y_val   = y_train[val_idx];   y_train = y_train[train_idx]
+split = int(N * 0.9)
+train_idx = idx[:split]
+val_idx = idx[split:]
 
-print(f"Train: {X_train.shape}  Val: {X_val.shape}")
+print("Train samples:", len(train_idx))
+print("Val samples:", len(val_idx))
 
-# Separate label columns
-def split_labels(y):
-    """Returns a list: [length, d1, d2, d3, d4, d5]"""
-    return [y[:, i] for i in range(MAX_DIGITS + 1)]
+def make_dataset(indices, shuffle=False):
+    def gen():
+        for i in indices:
+            image = X[i].astype("float32") / 255.0
+            label = y[i]
+            yield image, {
+                "length": label[0],
+                "digit_1": label[1],
+                "digit_2": label[2],
+                "digit_3": label[3],
+                "digit_4": label[4],
+                "digit_5": label[5],
+            }
 
-y_train_split = split_labels(y_train)
-y_val_split   = split_labels(y_val)
-
-
-# ── 2. Data augmentation ─────────────────────────────────────────────────────
-augment = keras.Sequential([
-    layers.RandomFlip("horizontal"),
-    layers.RandomRotation(0.05),
-    layers.RandomZoom(0.1),
-    layers.RandomBrightness(0.15),
-    layers.RandomContrast(0.15),
-], name="augmentation")
-
-
-# ── 3. Model architecture ─────────────────────────────────────────────────────
-def build_model(img_size=IMG_SIZE):
-    inputs = keras.Input(shape=(img_size, img_size, 3), name="image")
-    x = augment(inputs)
-
-    # ── Backbone: MobileNetV2 (pretrained on ImageNet, fine-tuned) ──
-    base = keras.applications.MobileNetV2(
-        input_shape=(img_size, img_size, 3),
-        include_top=False,
-        weights="imagenet",
+    output_signature = (
+        tf.TensorSpec(shape=(IMG_SIZE, IMG_SIZE, 3), dtype=tf.float32),
+        {
+            "length": tf.TensorSpec(shape=(), dtype=tf.int32),
+            "digit_1": tf.TensorSpec(shape=(), dtype=tf.int32),
+            "digit_2": tf.TensorSpec(shape=(), dtype=tf.int32),
+            "digit_3": tf.TensorSpec(shape=(), dtype=tf.int32),
+            "digit_4": tf.TensorSpec(shape=(), dtype=tf.int32),
+            "digit_5": tf.TensorSpec(shape=(), dtype=tf.int32),
+        }
     )
-    # Unfreeze top 40 layers for fine-tuning
-    for layer in base.layers[:-40]:
-        layer.trainable = False
-    for layer in base.layers[-40:]:
-        layer.trainable = True
 
-    x = base(x, training=False)
-    x = layers.GlobalAveragePooling2D()(x)
-    x = layers.Dropout(0.3)(x)
-    x = layers.Dense(512, activation="relu")(x)
-    x = layers.Dropout(0.3)(x)
-    x = layers.Dense(256, activation="relu")(x)
+    ds = tf.data.Dataset.from_generator(gen, output_signature=output_signature)
 
-    # ── Output heads ──
-    # Head 0: how many digits (0-5)
-    length_out = layers.Dense(NUM_CLASSES_LENGTH, activation="softmax", name="length")(x)
-    # Heads 1-5: each digit class (0=null, 1-9, 10)
-    digit_outs = [
-        layers.Dense(NUM_CLASSES_DIGIT, activation="softmax", name=f"digit_{i+1}")(x)
-        for i in range(MAX_DIGITS)
-    ]
+    if shuffle:
+        ds = ds.shuffle(2000)
 
-    outputs = [length_out] + digit_outs
-    model = keras.Model(inputs=inputs, outputs=outputs)
-    return model
+    ds = ds.batch(BATCH_SIZE).prefetch(tf.data.AUTOTUNE)
+    return ds
 
+train_ds = make_dataset(train_idx, shuffle=True)
+val_ds = make_dataset(val_idx, shuffle=False)
 
-model = build_model()
-model.summary()
+inputs = keras.Input(shape=(IMG_SIZE, IMG_SIZE, 3), name="image")
 
-# ── 4. Compile ────────────────────────────────────────────────────────────────
-losses = {f"length": "sparse_categorical_crossentropy"}
-losses.update({f"digit_{i+1}": "sparse_categorical_crossentropy" for i in range(MAX_DIGITS)})
+x = layers.RandomRotation(0.03)(inputs)
+x = layers.RandomZoom(0.08)(x)
+x = layers.RandomContrast(0.10)(x)
 
-# Weight digit losses more than length loss
-loss_weights = {"length": 0.5}
-loss_weights.update({f"digit_{i+1}": 1.0 for i in range(MAX_DIGITS)})
+x = layers.Conv2D(32, 3, padding="same", activation="relu")(x)
+x = layers.MaxPooling2D(2)(x)
 
-model.compile(
-    optimizer=keras.optimizers.Adam(LR),
-    loss=losses,
-    loss_weights=loss_weights,
-    metrics={k: "accuracy" for k in losses},
+x = layers.Conv2D(64, 3, padding="same", activation="relu")(x)
+x = layers.MaxPooling2D(2)(x)
+
+x = layers.Conv2D(128, 3, padding="same", activation="relu")(x)
+x = layers.MaxPooling2D(2)(x)
+
+x = layers.Flatten()(x)
+
+x = layers.Dense(256, activation="relu")(x)
+x = layers.Dropout(0.4)(x)
+
+x = layers.Dense(128, activation="relu")(x)
+x = layers.Dropout(0.3)(x)
+
+length_out = layers.Dense(NUM_CLASSES_LENGTH, activation="softmax", name="length")(x)
+digit_1 = layers.Dense(NUM_CLASSES_DIGIT, activation="softmax", name="digit_1")(x)
+digit_2 = layers.Dense(NUM_CLASSES_DIGIT, activation="softmax", name="digit_2")(x)
+digit_3 = layers.Dense(NUM_CLASSES_DIGIT, activation="softmax", name="digit_3")(x)
+digit_4 = layers.Dense(NUM_CLASSES_DIGIT, activation="softmax", name="digit_4")(x)
+digit_5 = layers.Dense(NUM_CLASSES_DIGIT, activation="softmax", name="digit_5")(x)
+
+model = keras.Model(
+    inputs=inputs,
+    outputs=[length_out, digit_1, digit_2, digit_3, digit_4, digit_5]
 )
 
-# ── 5. Callbacks ──────────────────────────────────────────────────────────────
+model.compile(
+    optimizer=keras.optimizers.Adam(learning_rate=LR),
+    loss={
+        "length": "sparse_categorical_crossentropy",
+        "digit_1": "sparse_categorical_crossentropy",
+        "digit_2": "sparse_categorical_crossentropy",
+        "digit_3": "sparse_categorical_crossentropy",
+        "digit_4": "sparse_categorical_crossentropy",
+        "digit_5": "sparse_categorical_crossentropy",
+    },
+    loss_weights={
+        "length": 0.5,
+        "digit_1": 1.5,
+        "digit_2": 1.5,
+        "digit_3": 1.2,
+        "digit_4": 1.0,
+        "digit_5": 1.0,
+    },
+    metrics={
+        "length": "accuracy",
+        "digit_1": "accuracy",
+        "digit_2": "accuracy",
+        "digit_3": "accuracy",
+        "digit_4": "accuracy",
+        "digit_5": "accuracy",
+    }
+)
+
+model.summary()
+
 callbacks = [
     keras.callbacks.ModelCheckpoint(
         MODEL_PATH,
-        save_best_only=False,
-        save_freq='epoch',
+        monitor="val_loss",
+        save_best_only=True,
         verbose=1
     ),
     keras.callbacks.EarlyStopping(
-        monitor="val_loss", patience=7, restore_best_weights=True, verbose=1
+        monitor="val_loss",
+        patience=4,
+        restore_best_weights=True,
+        verbose=1
     ),
     keras.callbacks.ReduceLROnPlateau(
-        monitor="val_loss", factor=0.5, patience=3, verbose=1
-    ),
+        monitor="val_loss",
+        factor=0.5,
+        patience=2,
+        min_lr=1e-6,
+        verbose=1
+    )
 ]
 
-# ── 6. Train ──────────────────────────────────────────────────────────────────
-# Build y dict for Keras multi-output API
-def make_y_dict(y_list):
-    keys = ["length"] + [f"digit_{i+1}" for i in range(MAX_DIGITS)]
-    return {k: v for k, v in zip(keys, y_list)}
-
 history = model.fit(
-    X_train, make_y_dict(y_train_split),
-    validation_data=(X_val, make_y_dict(y_val_split)),
-    batch_size=BATCH_SIZE,
+    train_ds,
+    validation_data=val_ds,
     epochs=EPOCHS,
-    callbacks=callbacks,
+    callbacks=callbacks
 )
 
-print(f"\nBest model saved to {MODEL_PATH}")
+model.save(MODEL_PATH)
 
-# ── 7. Quick training curve summary ──────────────────────────────────────────
-import json
 with open("training_history.json", "w") as f:
-    json.dump({k: [float(v) for v in vals] for k, vals in history.history.items()}, f, indent=2)
-print("Training history saved to training_history.json")
+    json.dump(
+        {k: [float(v) for v in vals] for k, vals in history.history.items()},
+        f,
+        indent=2
+    )
+
+print("Saved model:", MODEL_PATH)
